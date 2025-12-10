@@ -41,6 +41,9 @@ python parser.py extract \
   --plate-barcode PLATE123 \
   --conf-json conf.json \
   --log-level INFO
+# 또는 (전역 옵션을 앞에 두어도 됨)
+python -m atgcu_ichms.cli --conf-json conf.json --log-level INFO \
+  extract --product product --sample-list /path/samples.txt --plate-barcode PLATE123
 ```
 - 출력: `output_dir/product.oa.txt`, `output_dir/product.json`, QC 리포트 `product.oa.txt.qc.report.txt`
 
@@ -56,6 +59,19 @@ python parser.py api-to-lis \
 - `conf.json`의 `product.api.endpoint`, `headers`, `auth_token`을 사용.
 
 ## 참고
-- Imputed VCF는 bgzip + tabix 인덱스가 있으면 성능이 향상됩니다.
+- Imputed VCF는 bgzip + tabix 인덱스가 있으면 성능이 크게 향상됩니다.
+  - 예: `bgzip imputed_all.vcf` (또는 이미 .vcf.gz면 생략) 후 `tabix -p vcf imputed_all.vcf.gz`
+  - `.tbi`/`.csi`가 있으면 `pysam`을 통해 랜덤 액세스로 조회합니다.
 - `pysam` 미설치 시 자동으로 스트리밍 fallback을 사용합니다.
+- 마커 TSV에 `CHROM`, `POS`가 비어 있으면 `utils/rsid_coordi_fetch.py`로 좌표를 채울 수 있습니다.
+  - 예:
+    ```bash
+    python utils/rsid_coordi_fetch.py \
+      --input src/dtc_53_rs_markers.txt \
+      --output src/dtc_53_rs_markers.filled.txt \
+      --assembly GRCh38 \
+      --sleep 0.2
+    ```
+  - 입력 TSV 컬럼: `RS_ID, NORMAL_ALLELE, RISK_ALLELE, CHROM, POS`
+  - CHROM/POS가 비어 있는 RS만 dbSNP API에서 조회해 채웁니다.
 

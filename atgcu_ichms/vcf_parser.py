@@ -291,3 +291,53 @@ class VCFParser:
                     }
                     self.indexed_variant_count += 1
 
+    def extract_markers(
+        self,
+        marker_df: pd.DataFrame,
+        sample_list: List[str],
+    ) -> Tuple[Dict[str, Dict[str, Dict]], Dict[str, Tuple]]:
+        """
+        마커 리스트와 샘플 리스트에 해당하는 genotype 추출
+        Returns:
+            (results, marker_positions)
+            results: {rs_id: {sample_id: {...}}}
+            marker_positions: {rs_id: (chrom, pos, ref, alt)}
+        """
+        results: Dict[str, Dict[str, Dict]] = {}
+        marker_positions: Dict[str, Tuple] = {}
+
+        for _, row in marker_df.iterrows():
+            rs_id = row["RS_ID"]
+            variant = self.get_variant_by_rsid(rs_id)
+            if variant is None:
+                self.logger.warning(f"RS ID not found in VCF: {rs_id}")
+                continue
+
+            chrom = variant["CHROM"]
+            pos = variant["POS"]
+            ref = variant["REF"]
+            alt = variant["ALT"]
+
+            marker_positions[rs_id] = (chrom, pos, ref, alt)
+            results[rs_id] = {}
+
+            for sample in sample_list:
+                if sample in self.samples:
+                    gt = variant[sample]
+                    allele1, allele2 = self.decode_genotype(gt, ref, alt)
+                    results[rs_id][sample] = {
+                        "allele1": allele1,
+                        "allele2": allele2,
+                        "chrom": chrom,
+                        "pos": pos,
+                        "ref": ref,
+                        "alt": alt,
+                        "gt_raw": gt,
+                        "is_no_call": allele1 is None or allele2 is None,
+                    }
+                else:
+                    self.logger.warning(f"Sample not found in VCF: {sample}")
+
+        self.logger.info(f"Extracted {len(results)} markers for {len(sample_list)} samples")
+        return results, marker_positions
+
