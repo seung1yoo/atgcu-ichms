@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Thin wrapper to call atgcu_ichms CLI.
+Usage:
+    python parser.py extract --product <product> --sample-list <path> --plate-barcode <str>
+    python parser.py api-to-lis --product <product> --json <path>
+"""
+import sys
+from atgcu_ichms.cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
 Markers Parser
 
 Description:
