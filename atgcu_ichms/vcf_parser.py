@@ -1,5 +1,4 @@
 import logging
-import sys
 from pathlib import Path
 from typing import Tuple, Dict, List, Optional
 
@@ -23,6 +22,8 @@ class VCFParser:
         self.position_index: Dict[Tuple[str, str], Dict[str, Dict[str, str]]] = {}
         self.rsid_index: Dict[str, Dict[str, Dict[str, str]]] = {}
         self.indexed_variant_count: int = 0
+        self.tabix_hits: set = set()
+        self.stream_hits: set = set()
 
         self.logger.info(f"VCFParser initialized with file: {self.file_path}")
 
@@ -170,6 +171,7 @@ class VCFParser:
         positions: set,
         target_samples: Optional[set] = None,
         missing_rs_ids: Optional[set] = None,
+        mode: str = "auto",
     ) -> None:
         normalized_positions = {(str(c).replace("chr", ""), str(p)) for c, p in positions}
         missing_rs_ids = set(missing_rs_ids) if missing_rs_ids else set()
@@ -177,10 +179,16 @@ class VCFParser:
             self.logger.info("No positions or RS IDs requested; skipping imputed VCF indexing.")
             return
 
+        mode = (mode or "auto").lower()
+        allow_tabix = mode in ("auto", "tabix")
+        allow_stream = mode in ("auto", "stream")
+
         self.parse_header_only()
         self.position_index = {}
         self.rsid_index = {}
         self.indexed_variant_count = 0
+        self.tabix_hits = set()
+        self.stream_hits = set()
 
         target_samples = set(target_samples) if target_samples else set(self.samples)
         sample_to_idx = {s: i for i, s in enumerate(self.samples)}
@@ -190,9 +198,9 @@ class VCFParser:
         has_index = tbi_path.exists() or csi_path.exists()
 
         used_tabix = False
-        if has_index and normalized_positions:
+        if allow_tabix and has_index and normalized_positions:
             try:
-                import pysam
+                import pysam  # type: ignore
 
                 self.logger.info("Using tabix index for targeted fetching")
                 vcf = pysam.VariantFile(str(self.file_path))
@@ -219,6 +227,7 @@ class VCFParser:
                                     "samples": sample_gts,
                                 }
                                 self.indexed_variant_count += 1
+                                self.tabix_hits.add((chrom, pos))
                                 break
                             else:
                                 continue
@@ -236,8 +245,11 @@ class VCFParser:
         open_func = gzip.open if str(self.file_path).endswith(".gz") else open
         mode = "rt" if str(self.file_path).endswith(".gz") else "r"
 
-        need_stream = True
-        if used_tabix and not missing_rs_ids and len(self.position_index) >= len(normalized_positions):
+        need_stream = allow_stream
+        if allow_stream:
+            if used_tabix and not missing_rs_ids and len(self.position_index) >= len(normalized_positions):
+                need_stream = False
+        else:
             need_stream = False
 
         if not need_stream:
@@ -280,6 +292,7 @@ class VCFParser:
                 if hit_position:
                     self.position_index[key] = {"REF": ref, "ALT": alt, "samples": sample_gts}
                     self.indexed_variant_count += 1
+                    self.stream_hits.add(key)
 
                 if hit_rsid:
                     self.rsid_index[rsid] = {

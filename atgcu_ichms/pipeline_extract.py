@@ -1,11 +1,20 @@
 import logging
 from pathlib import Path
-from typing import List, Dict, Tuple
 
 import pandas as pd
 
-from .io_utils import load_list_file, load_marker_tsv, sanitize_allele, write_oa, write_json
-from .qc import QCReporter
+from .io_utils import load_marker_tsv, sanitize_allele, write_oa, write_json, load_sample_sheet, load_oa_table
+from .qc import (
+    QCReporter,
+    add_run_args,
+    add_marker_info,
+    init_rs_rows,
+    update_rs_with_apt,
+    add_imputed_section,
+    add_imputed_hits_detail,
+    write_rs_qc,
+    compare_with_genocare,
+)
 from .vcf_parser import VCFParser
 
 
@@ -14,8 +23,7 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
     apt_vcf = conf["apt_vcf"]
     imputed_vcf = conf["imputed_vcf"]
     rsmarker_list = conf["rsmarker_list"]
-    sample_list_path = args.sample_list
-    plate_barcode = args.plate_barcode
+    sample_sheet_path = args.sample_sheet
     output_dir = Path(conf["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     output_oa_file = output_dir / f"{product}.oa.txt"
@@ -23,25 +31,25 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
     qc_report_path = conf.get("qc_report") or f"{output_oa_file}.qc.report.txt"
 
     qc = QCReporter(logger)
-    qc.add_section(f"{product} Markers Parser QC Report")
-    qc.add_line(f"  실행 시간: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    add_run_args(qc, product, args)
 
-    sample_list_raw = load_list_file(sample_list_path, logger)
-    sample_analysis = qc.analyze_list_file(sample_list_raw, "Sample List")
+    sample_sheet = load_sample_sheet(sample_sheet_path, logger)
+    sample_names = sample_sheet["sample_names"]
+    plate_barcode = sample_sheet["plate_barcode"]
+    sample_id_map = sample_sheet["sample_id_map"]
+
+    sample_analysis = qc.analyze_list_file(sample_names, "Sample Sheet (SAMPLE_NAME)")
     sample_list = sample_analysis["unique_items"]
+    if len(sample_list) != len(sample_names):
+        logger.error("Duplicate SAMPLE_NAME entries detected in sample sheet; aborting.")
+        return 1
 
     marker_df = load_marker_tsv(rsmarker_list, logger)
     marker_list = marker_df["RS_ID"].tolist()
     qc.analyze_list_file(marker_list, "RS Marker List")
+    qc_rs_rows = init_rs_rows(marker_list)
 
-    qc.add_section("RS Marker TSV 정보")
-    qc.add_key_value("총 마커 수", len(marker_df))
-    qc.add_line("")
-    qc.add_line("  [마커별 Allele 정보 (처음 10개)]")
-    for _, row in marker_df.head(10).iterrows():
-        qc.add_line(f"    - {row['RS_ID']}: NORMAL={row['NORMAL_ALLELE']}, RISK={row['RISK_ALLELE']}")
-    if len(marker_df) > 10:
-        qc.add_line(f"    ... 외 {len(marker_df) - 10}개")
+    add_marker_info(qc, marker_df)
 
     qc.add_section("APT VCF 파싱")
     qc.add_key_value("파일", apt_vcf)
@@ -54,6 +62,7 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
     apt_results, marker_positions = apt_parser.extract_markers(marker_df, sample_list)
     qc.add_key_value("요청 마커 수", len(marker_list))
     qc.add_key_value("APT VCF에서 찾은 마커 수", len(apt_results))
+    update_rs_with_apt(qc_rs_rows, marker_list, apt_results, marker_positions)
     missing_in_apt = [m for m in marker_list if m not in apt_results]
     if missing_in_apt:
         qc.add_line("")
@@ -62,12 +71,9 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
             qc.add_line(f"    - {m}")
         logger.info(f"APT VCF에 없는 마커 목록({len(missing_in_apt)}개): {', '.join(missing_in_apt)}")
 
-    qc.add_section("Imputed VCF 파싱")
-    qc.add_key_value("파일", imputed_vcf)
     imputed_parser = VCFParser(imputed_vcf, logger)
     imputed_parser.parse_header_only()
     imputed_samples = imputed_parser.get_samples()
-    qc.add_key_value("VCF 내 샘플 수", len(imputed_samples))
 
     needed_positions = set()
     for _, samples_data in apt_results.items():
@@ -87,7 +93,7 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
     missing_position_set = set(missing_positions.values())
     total_positions = needed_positions | missing_position_set
 
-    qc.add_key_value("Imputed 조회 위치 수", len(total_positions))
+    add_imputed_section(qc, imputed_vcf, imputed_parser, len(total_positions), getattr(args, "imputed_mode", "auto"))
     if total_positions:
         qc.add_line("")
         qc.add_line("  [Imputed 조회 위치 목록 (chrom:pos)]")
@@ -100,8 +106,13 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
             + ", ".join([f"{c}:{p}" for c, p in sorted(total_positions, key=lambda x: (str(x[0]), str(x[1])))])
         )
 
-    imputed_parser.index_positions(total_positions, target_samples=set(sample_list), missing_rs_ids=set())
-    qc.add_key_value("조회된 variant 수", imputed_parser.indexed_variant_count)
+    imputed_parser.index_positions(
+        total_positions,
+        target_samples=set(sample_list),
+        missing_rs_ids=set(),
+        mode=getattr(args, "imputed_mode", "auto"),
+    )
+    add_imputed_hits_detail(qc, imputed_parser)
 
     qc.add_section("No Call 처리")
     no_call_count = 0
@@ -223,27 +234,63 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
                         "source": "NORMAL_FILLED",
                     }
 
+    # RS 단위 QC 결과 생성
+    def _resolve_pos(rs_id: str):
+        if rs_id in marker_positions:
+            chrom, pos, _, _ = marker_positions[rs_id]
+            return (str(chrom).replace("chr", ""), str(pos))
+        if rs_id in missing_positions:
+            chrom, pos = missing_positions[rs_id]
+            return (str(chrom).replace("chr", ""), str(pos))
+        if rs_id in apt_results and apt_results[rs_id]:
+            sample_any = next(iter(apt_results[rs_id].values()))
+            return (str(sample_any.get("chrom", ".")).replace("chr", ""), str(sample_any.get("pos", ".")))
+        return None
+
+    for rs_id in marker_list:
+        rs_entry = qc_rs_rows[rs_id]
+        pos_tuple = _resolve_pos(rs_id)
+        rs_entry["imputed_tabix_hit"] = pos_tuple in imputed_parser.tabix_hits if pos_tuple else False
+        rs_entry["imputed_stream_hit"] = pos_tuple in imputed_parser.stream_hits if pos_tuple else False
+
+        sources = set()
+        if rs_id in apt_results:
+            for sample_name, geno_info in apt_results[rs_id].items():
+                sources.add(geno_info.get("source", "APT"))
+        rs_entry["used_imputed"] = "IMPUTED" in sources
+        rs_entry["used_normal_fill"] = "NORMAL_FILLED" in sources
+        if "IMPUTED" in sources:
+            rs_entry["final_source"] = "IMPUTED"
+        elif "NORMAL_FILLED" in sources:
+            rs_entry["final_source"] = "NORMAL_FILLED"
+        elif sources:
+            rs_entry["final_source"] = "APT"
+        else:
+            rs_entry["final_source"] = "MISSING"
+
     qc.add_section("OA 형식 출력")
     oa_rows = []
     for rs_id in marker_list:
         if rs_id in apt_results:
-            for sample_id in sample_list:
-                if sample_id in apt_results[rs_id]:
-                    geno_info = apt_results[rs_id][sample_id]
+            for sample_name in sample_list:
+                if sample_name in apt_results[rs_id]:
+                    geno_info = apt_results[rs_id][sample_name]
                     source = geno_info.get("source", "APT")
+                    sample_id_value = sample_id_map.get(sample_name, sample_name)
                     oa_row = {
-                        "Sample ID": sample_id,
+                        "Sample ID": sample_id_value,
                         "Plate Barcode": plate_barcode,
-                        "Gene Symbol": source,
+                        "Gene Symbol": ".", # TODO: 추후 수정
                         "NCBI SNP Reference": rs_id,
-                        "Assay Name or ID": rs_id,
+                        "Assay Name or ID": source,
                         "Allele 1 Call": geno_info["allele1"],
                         "Allele 2 Call": geno_info["allele2"],
                     }
                     oa_rows.append(oa_row)
 
     result_df = pd.DataFrame(oa_rows)
-    result_df["Sample ID"] = pd.Categorical(result_df["Sample ID"], categories=sample_list, ordered=True)
+    sample_id_order = [sample_id_map[s] for s in sample_list]
+    result_df["Sample ID"] = pd.Categorical(result_df["Sample ID"], categories=sample_id_order, ordered=True)
     result_df["NCBI SNP Reference"] = pd.Categorical(
         result_df["NCBI SNP Reference"], categories=marker_list, ordered=True
     )
@@ -253,15 +300,15 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
     for rs_id in marker_list:
         if rs_id not in apt_results:
             continue
-        for sample_id in sample_list:
-            if sample_id not in apt_results[rs_id]:
+        for sample_name in sample_list:
+            if sample_name not in apt_results[rs_id]:
                 continue
-            geno_info = apt_results[rs_id][sample_id]
+            geno_info = apt_results[rs_id][sample_name]
             a1 = sanitize_allele(geno_info["allele1"])
             a2 = sanitize_allele(geno_info["allele2"])
             json_rows.append(
                 {
-                    "sampleId": sample_id,
+                    "sampleId": sample_id_map.get(sample_name, sample_name),
                     "plateBarcode": plate_barcode,
                     "itemCd": rs_id,
                     "result1": a1,
@@ -282,7 +329,7 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
             "APT VCF": apt_vcf,
             "Imputed VCF": imputed_vcf,
             "Marker List": rsmarker_list,
-            "Sample List": sample_list_path,
+            "Sample Sheet": sample_sheet_path,
             "Plate Barcode": plate_barcode,
             "Generated Date": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
         },
@@ -290,6 +337,46 @@ def run_extract(conf: dict, args, logger: logging.Logger) -> int:
         logger=logger,
     )
     write_json(output_json_file, json_rows, logger)
+
+    # QC RS 상태 TSV 저장
+    qc_rs_df, qc_rs_path = write_rs_qc(output_dir, product, qc_rs_rows, logger)
+
+    # genocare OA와 비교 (옵션)
+    if conf.get("genocare_all_gt"):
+        genocare_path = Path(conf["genocare_all_gt"])
+        if genocare_path.exists():
+            compare_df, compare_summary = compare_with_genocare(
+                apt_results,
+                sample_list,
+                marker_list,
+                sample_id_map,
+                genocare_path,
+                logger,
+            )
+            compare_path = output_dir / f"{product}.genocare_compare.tsv"
+            compare_df.to_csv(compare_path, sep="\t", index=False)
+            logger.info(f"Written genocare comparison TSV to {compare_path}")
+
+            qc.add_section("Genocare 비교")
+            qc.add_key_value("비교 총 건수", compare_summary["total"])
+            qc.add_key_value("일치 수", compare_summary["match"])
+            qc.add_key_value("불일치 수", compare_summary["mismatch"])
+            qc.add_key_value("genocare에 없는 건수", compare_summary["missing_genocare"])
+            qc.add_key_value("비교 파일", str(compare_path))
+        else:
+            logger.warning(f"Genocare OA file not found: {genocare_path}")
+
+    # QC 리포트에 요약 추가
+    qc.add_section("Imputed 조회 상세")
+    qc.add_key_value("tabix 조회 성공 위치 수", len(imputed_parser.tabix_hits))
+    qc.add_key_value("스트리밍 조회 성공 위치 수", len(imputed_parser.stream_hits))
+    qc.add_key_value("고유 위치 수", len(set(imputed_parser.tabix_hits) | set(imputed_parser.stream_hits)))
+    qc.add_key_value("총 카운트(indexed_variant_count)", imputed_parser.indexed_variant_count)
+    qc.add_section("RS 상태 요약")
+    qc.add_key_value("IMPUTED 사용 RS 수", int((qc_rs_df["final_source"] == "IMPUTED").sum()))
+    qc.add_key_value("NORMAL_FILLED 사용 RS 수", int((qc_rs_df["final_source"] == "NORMAL_FILLED").sum()))
+    qc.add_key_value("APT 사용 RS 수", int((qc_rs_df["final_source"] == "APT").sum()))
+    qc.add_key_value("MISSING RS 수", int((qc_rs_df["final_source"] == "MISSING").sum()))
 
     qc.add_section("처리 완료")
     qc.add_key_value("출력 파일", str(output_oa_file))

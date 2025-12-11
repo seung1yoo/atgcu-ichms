@@ -44,6 +44,7 @@ def setup_logger(name: str, log_level: str = "INFO", log_file: str = None) -> lo
         isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == str(Path(log_file))
         for h in logger.handlers
     ):
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)  # ensure log dir exists
         file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
         file_handler.setLevel(getattr(logging, log_level.upper()))
         file_handler.setFormatter(formatter)
