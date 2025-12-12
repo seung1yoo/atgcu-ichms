@@ -83,8 +83,22 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="JSON file to post"
     )
-    p_api.add_argument("--timeout", type=float, default=10.0, help="API timeout seconds")
-    p_api.add_argument("--retries", type=int, default=3, help="API retries")
+    p_api.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="API timeout seconds")
+    p_api.add_argument(
+        "--retries",
+        type=int,
+        default=3,
+        help="API retries (default: 3)",
+    )
+    p_api.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS certificate verification for API POST (not recommended)",
+    )
 
     return parser
 
@@ -103,29 +117,26 @@ def main() -> int:
         path_obj = Path(p)
         return str(path_obj) if path_obj.is_absolute() else str(Path(base) / path_obj)
 
-    base_path = args.path_anl_for_all
-    if base_path:
-        conf["apt_vcf"] = _join_if_relative(conf["apt_vcf"], base_path)
-        conf["imputed_vcf"] = _join_if_relative(conf["imputed_vcf"], base_path)
-        conf["genocare_all_gt"] = _join_if_relative(conf["genocare_all_gt"], base_path)
-
-    work_base = args.path_wkdir
-    if work_base:
-        conf["output_dir"] = _join_if_relative(conf.get("output_dir", "."), work_base)
-        if conf.get("qc_report"):
-            conf["qc_report"] = _join_if_relative(conf["qc_report"], work_base)
-
-    output_dir = conf.get("output_dir", ".")
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    qc_report_path = None
     if args.command == "extract":
+        base_path = args.path_anl_for_all
+        if base_path:
+            conf["apt_vcf"] = _join_if_relative(conf["apt_vcf"], base_path)
+            conf["imputed_vcf"] = _join_if_relative(conf["imputed_vcf"], base_path)
+            conf["genocare_all_gt"] = _join_if_relative(conf["genocare_all_gt"], base_path)
+
+        work_base = args.path_wkdir
+        if work_base:
+            conf["output_dir"] = _join_if_relative(conf.get("output_dir", "."), work_base)
+            if conf.get("qc_report"):
+                conf["qc_report"] = _join_if_relative(conf["qc_report"], work_base)
+
+        output_dir = conf.get("output_dir", ".")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
         qc_report_path = conf.get("qc_report") or str(Path(output_dir) / f"{args.product}.oa.txt.qc.report.txt")
-
-    logger = setup_logger("atgcu-ichms", args.log_level, log_file=qc_report_path)
-
-    if args.command == "extract":
+        logger = setup_logger("atgcu-ichms", args.log_level, log_file=qc_report_path)
         return run_extract(conf, args, logger)
     if args.command == "api-to-lis":
+        logger = setup_logger("atgcu-ichms", args.log_level)
         return run_api(conf, args, logger)
     return 1
 

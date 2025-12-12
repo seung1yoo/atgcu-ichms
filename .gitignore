@@ -1,9 +1,8 @@
 conf.json
 src/**
-__pycache__/**
 data/251204_IPMI_Analysis_For_All/**
 data/251204_IPMI.sample_sheet.tsv
 data/251204_IPMI_Analysis_For_irs_v2/**
 ichms_genotype_data/dtc_62.json
 ichms_genotype_data/dtc_62.csv
-
+results/**

@@ -29,9 +29,17 @@ def run_api(conf: Dict[str, Any], args, logger: logging.Logger) -> int:
 
     timeout = args.timeout
     retries = args.retries
+    verify = not getattr(args, "insecure", False)
+
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
+            resp = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+                verify=verify,
+            )
             if resp.status_code >= 200 and resp.status_code < 300:
                 logger.info(f"API POST success: status={resp.status_code}")
                 return 0
